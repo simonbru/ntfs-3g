@@ -25,6 +25,8 @@ libntfs_3g_la_SOURCES =	\
 	compat.c 	\
 	compress.c 	\
 	debug.c 	\
+	decompress_common.c \
+	decompress_common.h \
 	device.c 	\
 	dir.c 		\
 	ea.c 		\
@@ -35,6 +37,7 @@ libntfs_3g_la_SOURCES =	\
 	lcnalloc.c 	\
 	logfile.c 	\
 	logging.c 	\
+	lzx_decompress.c\
 	mft.c 		\
 	misc.c 		\
 	mst.c 		\
@@ -43,9 +46,11 @@ libntfs_3g_la_SOURCES =	\
 	reparse.c 	\
 	runlist.c 	\
 	security.c 	\
+	system_compression.c	\
 	unistr.c 	\
 	volume.c 	\
-	xattrs.c
+	xattrs.c	\
+	xpress_decompress.c
 
 if NTFS_DEVICE_DEFAULT_IO_OPS
 if WINDOWS

@@ -36,6 +36,7 @@ headers = \
 	runlist.h	\
 	security.h	\
 	support.h	\
+	system_compression.h	\
 	types.h		\
 	unistr.h	\
 	volume.h 	\

@@ -99,6 +99,7 @@
 #include "xattrs.h"
 #include "misc.h"
 #include "ioctl.h"
+#include "system_compression.h"
 
 #include "ntfs-3g_common.h"
 
@@ -696,33 +697,47 @@ static int ntfs_fuse_getattr(const char *org_path, struct stat *stbuf)
                	goto exit;
 	}
 #endif
+	stbuf->st_nlink = le16_to_cpu(ni->mrec->link_count);
+
 	if (((ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)
 		|| (ni->flags & FILE_ATTR_REPARSE_POINT))
 	    && !stream_name_len) {
 		if (ni->flags & FILE_ATTR_REPARSE_POINT) {
-			char *target;
-			int attr_size;
 
-			errno = 0;
-			target = ntfs_make_symlink(ni, ctx->abs_mnt_point, &attr_size);
-				/*
-				 * If the reparse point is not a valid
-				 * directory junction, and there is no error
-				 * we still display as a symlink
-				 */
-			if (target || (errno == EOPNOTSUPP)) {
-					/* returning attribute size */
-				if (target)
-					stbuf->st_size = attr_size;
-				else
-					stbuf->st_size = sizeof(ntfs_bad_reparse);
-				stbuf->st_blocks = (ni->allocated_size + 511) >> 9;
-				stbuf->st_nlink = le16_to_cpu(ni->mrec->link_count);
-				stbuf->st_mode = S_IFLNK;
-				free(target);
-			} else {
+			s64 compressed_size = ntfs_get_system_compressed_file_size(ni);
+
+			if (compressed_size >= 0) {
+				/* System-compressed file  */
+				stbuf->st_size = ni->data_size;
+				stbuf->st_blocks = (compressed_size + 511) >> 9;
+				stbuf->st_mode = S_IFREG | (0555 & ~ctx->fmask);
+			} else if (errno != EOPNOTSUPP) {
 				res = -errno;
 				goto exit;
+			} else {
+				char *target;
+				int attr_size;
+
+				errno = 0;
+				target = ntfs_make_symlink(ni, ctx->abs_mnt_point, &attr_size);
+					/*
+					 * If the reparse point is not a valid
+					 * directory junction, and there is no error
+					 * we still display as a symlink
+					 */
+				if (target || (errno == EOPNOTSUPP)) {
+						/* returning attribute size */
+					if (target)
+						stbuf->st_size = attr_size;
+					else
+						stbuf->st_size = sizeof(ntfs_bad_reparse);
+					stbuf->st_blocks = (ni->allocated_size + 511) >> 9;
+					stbuf->st_mode = S_IFLNK;
+					free(target);
+				} else {
+					res = -errno;
+					goto exit;
+				}
 			}
 		} else {
 			/* Directory. */
@@ -761,7 +776,6 @@ static int ntfs_fuse_getattr(const char *org_path, struct stat *stbuf)
 		 * See more on the ntfs-3g-devel list.
 		 */
 		stbuf->st_blocks = (ni->allocated_size + 511) >> 9;
-		stbuf->st_nlink = le16_to_cpu(ni->mrec->link_count);
 		if (ni->flags & FILE_ATTR_SYSTEM || stream_name_len) {
 			na = ntfs_attr_open(ni, AT_DATA, stream_name,
 					stream_name_len);
@@ -1216,6 +1230,18 @@ static int ntfs_fuse_open(const char *org_path, struct fuse_file_info *fi)
 			res = -EPERM;
 			goto exit;
 		}
+		/* deny opening the unnamed data stream of a system-compressed
+		 * file for writing (a named stream is okay)  */
+		if (!stream_name_len) {
+			if (ntfs_get_system_compressed_file_size(ni) >= 0) {
+				res = -EPERM;
+				goto exit;
+			}
+			if (errno != EOPNOTSUPP) {
+				res = -errno;
+				goto exit;
+			}
+		}
 	}
 exit:
 	ntfs_attr_close(na);
@@ -1249,6 +1275,26 @@ static int ntfs_fuse_read(const char *org_path, char *buf, size_t size,
 		res = -errno;
 		goto exit;
 	}
+
+	if (!stream_name_len) {
+		struct ntfs_system_decompression_ctx *dctx =
+			ntfs_open_system_decompression_ctx(ni);
+		if (dctx) {
+			res = ntfs_read_system_compressed_data(dctx, offset,
+							       size, buf);
+			ntfs_close_system_decompression_ctx(dctx);
+			if (res < 0) {
+				res = -errno;
+				goto exit;
+			}
+			total = res;
+			goto ok;
+		} else if (errno != EOPNOTSUPP) {
+			res = -errno;
+			goto exit;
+		}
+	}
+
 	na = ntfs_attr_open(ni, AT_DATA, stream_name, stream_name_len);
 	if (!na) {
 		res = -errno;
@@ -1284,7 +1330,7 @@ static int ntfs_fuse_read(const char *org_path, char *buf, size_t size,
 		total += ret;
 	}
 ok:
-	ntfs_fuse_update_times(na->ni, NTFS_UPDATE_ATIME);
+	ntfs_fuse_update_times(ni, NTFS_UPDATE_ATIME);
 	res = total;
 exit:
 	if (na)
