@@ -1155,15 +1155,10 @@ static int ntfs_fuse_readdir(const char *path, void *buf,
 	return err;
 }
 
-static int ntfs_fuse_open(const char *org_path,
-#if !KERNELPERMS | (POSIXACLS & !KERNELACLS)
-		struct fuse_file_info *fi)
-#else
-		struct fuse_file_info *fi __attribute__((unused)))
-#endif
+static int ntfs_fuse_open(const char *org_path, struct fuse_file_info *fi)
 {
-	ntfs_inode *ni;
-	ntfs_attr *na;
+	ntfs_inode *ni = NULL;
+	ntfs_attr *na = NULL;
 	int res = 0;
 	char *path = NULL;
 	ntfschar *stream_name;
@@ -1177,55 +1172,55 @@ static int ntfs_fuse_open(const char *org_path,
 	if (stream_name_len < 0)
 		return stream_name_len;
 	ni = ntfs_pathname_to_inode(ctx->vol, NULL, path);
-	if (ni) {
-		na = ntfs_attr_open(ni, AT_DATA, stream_name, stream_name_len);
-		if (na) {
-#if !KERNELPERMS | (POSIXACLS & !KERNELACLS)
-			if (ntfs_fuse_fill_security_context(&security)) {
-				if (fi->flags & O_WRONLY)
-					accesstype = S_IWRITE;
-				else
-					if (fi->flags & O_RDWR)
-						 accesstype = S_IWRITE | S_IREAD;
-					else
-						accesstype = S_IREAD;
-				/*
-				 * directory must be searchable
-				 * and requested access allowed
-				 */
-				if (!ntfs_allowed_dir_access(&security,
-					    path,(ntfs_inode*)NULL,ni,S_IEXEC)
-				  || !ntfs_allowed_access(&security,
-						ni,accesstype))
-					res = -EACCES;
-			}
-#endif
-			if ((res >= 0)
-			    && (fi->flags & (O_WRONLY | O_RDWR))) {
-			/* mark a future need to compress the last chunk */
-				if (na->data_flags & ATTR_COMPRESSION_MASK)
-					fi->fh |= CLOSE_COMPRESSED;
-#ifdef HAVE_SETXATTR	/* extended attributes interface required */
-			/* mark a future need to fixup encrypted inode */
-				if (ctx->efs_raw
-				    && !(na->data_flags & ATTR_IS_ENCRYPTED)
-				    && (ni->flags & FILE_ATTR_ENCRYPTED))
-					fi->fh |= CLOSE_ENCRYPTED;
-#endif /* HAVE_SETXATTR */
-			/* mark a future need to update the mtime */
-				if (ctx->dmtime)
-					fi->fh |= CLOSE_DMTIME;
-			/* deny opening metadata files for writing */
-				if (ni->mft_no < FILE_first_user)
-					res = -EPERM;
-			}
-			ntfs_attr_close(na);
-		} else
-			res = -errno;
-		if (ntfs_inode_close(ni))
-			set_fuse_error(&res);
-	} else
+	if (!ni) {
 		res = -errno;
+		goto exit;
+	}
+	na = ntfs_attr_open(ni, AT_DATA, stream_name, stream_name_len);
+	if (!na) {
+		res = -errno;
+		goto exit;
+	}
+#if !KERNELPERMS | (POSIXACLS & !KERNELACLS)
+	if (ntfs_fuse_fill_security_context(&security)) {
+		if (fi->flags & O_WRONLY)
+			accesstype = S_IWRITE;
+		else if (fi->flags & O_RDWR)
+			accesstype = S_IWRITE | S_IREAD;
+		else
+			accesstype = S_IREAD;
+		/* directory must be searchable and requested access allowed  */
+		if (!ntfs_allowed_dir_access(&security, path, NULL, ni, S_IEXEC)
+		  || !ntfs_allowed_access(&security, ni,accesstype)) {
+			res = -EACCES;
+			goto exit;
+		}
+	}
+#endif
+	if (fi->flags & (O_WRONLY | O_RDWR)) {
+		/* mark a future need to compress the last chunk */
+		if (na->data_flags & ATTR_COMPRESSION_MASK)
+			fi->fh |= CLOSE_COMPRESSED;
+#ifdef HAVE_SETXATTR	/* extended attributes interface required */
+		/* mark a future need to fixup encrypted inode */
+		if (ctx->efs_raw
+		    && !(na->data_flags & ATTR_IS_ENCRYPTED)
+		    && (ni->flags & FILE_ATTR_ENCRYPTED))
+			fi->fh |= CLOSE_ENCRYPTED;
+#endif /* HAVE_SETXATTR */
+		/* mark a future need to update the mtime */
+		if (ctx->dmtime)
+			fi->fh |= CLOSE_DMTIME;
+		/* deny opening metadata files for writing */
+		if (ni->mft_no < FILE_first_user) {
+			res = -EPERM;
+			goto exit;
+		}
+	}
+exit:
+	ntfs_attr_close(na);
+	if (ntfs_inode_close(ni))
+		set_fuse_error(&res);
 	free(path);
 	if (stream_name_len)
 		free(stream_name);
